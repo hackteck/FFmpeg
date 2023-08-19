@@ -1,0 +1,169 @@
+diff --git a/fftools/cmdutils.c b/fftools/cmdutils.c
+index 4b50e15eef..877442e4a4 100644
+--- a/fftools/cmdutils.c
++++ b/fftools/cmdutils.c
+@@ -2023,7 +2023,14 @@ int show_help(void *optctx, const char *opt, const char *arg)
+         *par++ = 0;
+ 
+     if (!*topic) {
+-        show_help_default(topic, par);
++        if (strcmp(program_name, "ffmpeg") == 0)
++        {
++            show_help_default_ffmpeg(topic, par);
++        }
++        else
++        {
++            show_help_default_ffprobe(topic, par);
++        }
+     } else if (!strcmp(topic, "decoder")) {
+         show_help_codec(par, 0);
+     } else if (!strcmp(topic, "encoder")) {
+@@ -2041,7 +2048,14 @@ int show_help(void *optctx, const char *opt, const char *arg)
+     } else if (!strcmp(topic, "bsf")) {
+         show_help_bsf(par);
+     } else {
+-        show_help_default(topic, par);
++        if (strcmp(program_name, "ffmpeg") == 0)
++        {
++            show_help_default_ffmpeg(topic, par);
++        }
++        else
++        {
++            show_help_default_ffprobe(topic, par);
++        }
+     }
+ 
+     av_freep(&topic);
+diff --git a/fftools/cmdutils.h b/fftools/cmdutils.h
+index 50eed9b13a..8fd81990bb 100644
+--- a/fftools/cmdutils.h
++++ b/fftools/cmdutils.h
+@@ -259,7 +259,8 @@ void show_help_children(const AVClass *class, int flags);
+  * Per-fftool specific help handler. Implemented in each
+  * fftool, called by show_help().
+  */
+-void show_help_default(const char *opt, const char *arg);
++void show_help_default_ffmpeg(const char *opt, const char *arg);
++void show_help_default_ffprobe(const char *opt, const char *arg);
+ 
+ /**
+  * Generic -h handler common to all fftools.
+diff --git a/fftools/entrypoint.c b/fftools/entrypoint.c
+new file mode 100644
+index 0000000000..950f21d717
+--- /dev/null
++++ b/fftools/entrypoint.c
+@@ -0,0 +1,47 @@
++#include <string.h>
++#include <stdio.h>
++
++// Defaults
++char program_name[] = "ffmpeg";
++int program_birth_year = 2000;
++
++// import main functions
++extern int main_ffmpeg(int argc, char **argv);
++extern int main_ffprobe(int argc, char **argv);
++
++// program entrypoint
++int main(int argc, char **argv)
++{
++    if (argc > 1)
++    {
++        // define program to launch
++        char *launch_program = argv[1];
++
++        // shift arguments
++        for (int i = 1; i < argc; ++i)
++        {
++            argv[i] = argv[i + 1];
++        }
++        --argc;
++
++        // launch program
++        if (strcmp(launch_program, "ffmpeg") == 0)
++        {
++            // launch ffmpeg
++            main_ffmpeg(argc, argv);
++        }
++        else if (strcmp(launch_program, "ffprobe") == 0)
++        {
++            // set correct program name and birth year
++            strcpy(program_name, launch_program);
++            program_birth_year = 2007;
++            // launch ffprobe
++            main_ffprobe(argc, argv);
++        }
++        else
++        {
++            printf("Unknown program\n");
++        }
++    }
++    return 0;
++}
+diff --git a/fftools/ffmpeg.c b/fftools/ffmpeg.c
+index bdeff9a12e..7f78e90f45 100644
+--- a/fftools/ffmpeg.c
++++ b/fftools/ffmpeg.c
+@@ -106,8 +106,6 @@
+ 
+ #include "libavutil/avassert.h"
+ 
+-const char program_name[] = "ffmpeg";
+-const int program_birth_year = 2000;
+ 
+ static FILE *vstats_file;
+ 
+@@ -4840,7 +4838,7 @@ static void log_callback_null(void *ptr, int level, const char *fmt, va_list vl)
+ {
+ }
+ 
+-int main(int argc, char **argv)
++int main_ffmpeg(int argc, char **argv)
+ {
+     int i, ret;
+     BenchmarkTimeStamps ti;
+diff --git a/fftools/ffmpeg_opt.c b/fftools/ffmpeg_opt.c
+index 9c820ab73f..f4b839739b 100644
+--- a/fftools/ffmpeg_opt.c
++++ b/fftools/ffmpeg_opt.c
+@@ -3310,7 +3310,7 @@ static int opt_filter_complex_script(void *optctx, const char *opt, const char *
+     return 0;
+ }
+ 
+-void show_help_default(const char *opt, const char *arg)
++void show_help_default_ffmpeg(const char *opt, const char *arg)
+ {
+     /* per-file options have at least one of those set */
+     const int per_file = OPT_SPEC | OPT_OFFSET | OPT_PERFILE;
+diff --git a/fftools/ffprobe.c b/fftools/ffprobe.c
+index 20582ca7ac..93ee6b39e2 100644
+--- a/fftools/ffprobe.c
++++ b/fftools/ffprobe.c
+@@ -81,8 +81,6 @@ typedef struct InputFile {
+     int       nb_streams;
+ } InputFile;
+ 
+-const char program_name[] = "ffprobe";
+-const int program_birth_year = 2007;
+ 
+ static int do_bitexact = 0;
+ static int do_count_frames = 0;
+@@ -3583,7 +3581,7 @@ static int opt_print_filename(void *optctx, const char *opt, const char *arg)
+     return 0;
+ }
+ 
+-void show_help_default(const char *opt, const char *arg)
++void show_help_default_ffprobe(const char *opt, const char *arg)
+ {
+     av_log_set_callback(log_callback_help);
+     show_usage();
+@@ -3865,7 +3863,7 @@ static inline int check_section_show_entries(int section_id)
+             do_show_##varname = 1;                                      \
+     } while (0)
+ 
+-int main(int argc, char **argv)
++int main_ffprobe(int argc, char **argv)
+ {
+     const Writer *w;
+     WriterContext *wctx;

@@ -1,0 +1,172 @@
+name: Create a WASM port of FFmpeg
+
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      FFMPEG_VERSION: 4.3 # MAXIMUM SUPPORTED VERSION 5.0.3
+      SINLE_THREAD: false
+
+    steps:
+      - name: "Set environmental variables"
+        run: |
+          echo "### Hello world! :rocket:" >> $GITHUB_STEP_SUMMARY
+
+          BUILD_DIR="${{ github.workspace }}/build"
+
+          OPTIM_FLAGS=(
+            -O3
+            # -msimd128
+          )
+
+          CFLAGS=(
+            ${OPTIM_FLAGS[@]}
+            -I$BUILD_DIR/include
+          )
+          [[ $SINLE_THREAD = true ]] || CFLAGS+=(-s USE_PTHREADS=1)
+
+          LDFLAGS=(
+            ${CFLAGS[@]}
+            -L$BUILD_DIR/lib
+          )
+
+          echo "BUILD_DIR=$BUILD_DIR"                             >> $GITHUB_ENV
+          echo "OPTIM_FLAGS=$OPTIM_FLAGS"                         >> $GITHUB_ENV
+          echo "CFLAGS=${CFLAGS[@]}"                              >> $GITHUB_ENV
+          echo "LDFLAGS=${LDFLAGS[@]}"                            >> $GITHUB_ENV
+
+      - name: Checkout source
+        uses: actions/checkout@v3
+
+      - name: Check EMSCRIPTEN Cache
+        uses: actions/cache@v3
+        id: cache
+        with:
+          path: emsdk
+          key: ${{ runner.os }}-emsdk
+
+      - name: Install EMSCRIPTEN
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git
+          ./emsdk/emsdk install latest
+          ./emsdk/emsdk activate latest
+          source ./emsdk/emsdk_env.sh
+
+      - name: LLVM
+        run: sudo apt-get install llvm -y
+
+      - name: Clone FFmpeg
+        run: git clone --depth 1 --branch n$FFMPEG_VERSION https://github.com/FFmpeg/FFmpeg
+
+      - name: Apply patch
+        run: |
+          cd FFmpeg
+          git apply ../src/FFmpeg/vendor/FFmpeg-wasm.patch
+
+      - name: Add filter
+        run: |
+          cp ./src/FFmpeg/vendor/vf_glsl.c ./FFmpeg/libavfilter/
+          sed -i '/extern const AVFilter ff_vf_zscale;/a extern const AVFilter ff_vf_glsl;' ./FFmpeg/libavfilter/allfilters.c
+          sed -i '/extern AVFilter ff_vf_zscale;/a extern AVFilter ff_vf_glsl;' ./FFmpeg/libavfilter/allfilters.c
+          sed -i '/+= vf_zscale.o/a OBJS-$(CONFIG_GLSL_FILTER) += vf_glsl.o' ./FFmpeg/libavfilter/Makefile
+
+      - name: x264 codec
+        run: |
+          git clone --depth 1 https://code.videolan.org/videolan/x264.git
+          cd x264
+          ARGS=(
+            --prefix=$BUILD_DIR
+            --host=i686-gnu                     # use i686 gnu
+            --enable-static                     # enable building static library
+            --disable-cli                       # disable cli tools
+            --disable-asm                       # disable asm optimization
+            --extra-cflags="$CFLAGS"
+          )
+          [[ $SINLE_THREAD = true ]] && ARGS+=(--disable-thread)
+          source ../emsdk/emsdk_env.sh
+          emconfigure ./configure "${ARGS[@]}"
+          emmake make clean
+          emmake make install-lib-static -j
+
+      - name: Configure FFmpeg
+        run: |
+          cd FFmpeg
+          CONFIG_ARGS=(
+            --target-os=none                            # use none to prevent any os specific configurations
+            --arch=x86_32                               # use x86_32 to achieve minimal architectural optimization
+            --enable-cross-compile                      # enable cross compile
+            --disable-x86asm                            # disable x86 asm
+            --disable-inline-asm                        # disable inline asm
+            --disable-stripping                         # disable stripping
+            --disable-programs                          # disable programs build (incl. ffplay, ffprobe & ffmpeg)
+            --disable-doc                               # disable doc
+            --disable-debug                             # disable debug info, required by closure
+            --disable-runtime-cpudetect                 # disable runtime cpu detect
+            --disable-autodetect                        # disable external libraries auto detect
+            --enable-nonfree                            # enable the compilation of non-free components or encoders
+            --enable-gpl                                # required by x264
+            --enable-libx264                            # enable x264
+            --extra-cflags="$CFLAGS"
+            --extra-cxxflags="$CFLAGS"
+            --extra-ldflags="$LDFLAGS"
+            --pkg-config-flags="--static"
+            --nm="llvm-nm -g"
+            --ar=emar
+            --as=llvm-as
+            --ranlib=llvm-ranlib
+            --cc=emcc
+            --cxx=em++
+            --objcc=emcc
+            --dep-cc=emcc
+          )
+          [[ $SINLE_THREAD = true ]] && CONFIG_ARGS+=(--disable-pthreads --disable-w32threads --disable-os2threads)
+
+          source ../emsdk/emsdk_env.sh
+          emconfigure ./configure "${CONFIG_ARGS[@]}"
+
+      - name: Enmake
+        run: |
+          cd FFmpeg
+          source ../emsdk/emsdk_env.sh
+          emmake make -j
+
+      - name: Build ffmpeg.wasm
+        run: |
+          cd FFmpeg
+          mkdir -p wasm/dist
+          ARGS=(
+            -I. -I./fftools
+            -Llibavcodec -Llibavdevice -Llibavfilter -Llibavformat -Llibavresample -Llibavutil -Llibpostproc -Llibswscale -Llibswresample
+            -Qunused-arguments
+            -o wasm/dist/ffmpeg.js fftools/ffmpeg_opt.c fftools/ffmpeg_filter.c fftools/ffmpeg_hw.c fftools/cmdutils.c fftools/ffmpeg.c fftools/ffprobe.c fftools/entrypoint.c
+            -lavdevice -lavfilter -lavformat -lavcodec -lswresample -lswscale -lavutil -lm -lpostproc -lx264
+            $LDFLAGS
+            -s WASM_BIGINT                                                                  # Enable big int support
+            -s MODULARIZE=1                                                                 # Enable modularization
+            -s EXPORT_NAME=_createFFmpeg                                                    # Export the module as '_createFFmpeg'
+            -s USE_SDL=2                                                                    # use SDL2
+            -s FULL_ES2
+            -s FULL_ES3
+            -s OFFSCREEN_FRAMEBUFFER=1
+            -s OFFSCREENCANVAS_SUPPORT=1
+            -s MIN_WEBGL_VERSION=2
+            -s INVOKE_RUN=0                                                                 # not to run the main() in the beginning
+            -s EXIT_RUNTIME=1                                                               # destroy runtime (this will trigger onExit and proper cleanup)
+            -s EXPORTED_FUNCTIONS="[_main]"                                                 # export main and proxy_main funcs
+            -s EXPORTED_RUNTIME_METHODS="[FS, callMain]"                                    # export preamble funcs
+            -s INITIAL_MEMORY=1073741824                                                    # set initial memory to 1GB
+            -s ALLOW_MEMORY_GROWTH=1                                                        # allow memory growth
+          )
+          [[ $SINLE_THREAD = true ]] || ARGS+=(-pthread -s PROXY_TO_PTHREAD=1)
+          source ../emsdk/emsdk_env.sh
+          emcc "${ARGS[@]}"
+
+      - name: Generating artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: FFmpeg-wasm
+          path: FFmpeg/wasm/dist/
+          retention-days: 5
